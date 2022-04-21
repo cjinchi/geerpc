@@ -4,24 +4,30 @@ import (
 	"GeeRPC/codec"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 )
 
 const MagicNumber = 0x31415926
 
 type Option struct {
-	MagicNumber int
-	CodecType   codec.Type
+	MagicNumber    int
+	CodecType      codec.Type
+	ConnectTimeout time.Duration
+	HandleTimeout  time.Duration
 }
 
 var DefaultOption = &Option{
-	MagicNumber: MagicNumber,
-	CodecType:   codec.GobType,
+	MagicNumber:    MagicNumber,
+	CodecType:      codec.GobType,
+	ConnectTimeout: 0,
+	HandleTimeout:  0,
 }
 
 type Server struct {
@@ -65,12 +71,12 @@ func (server *Server) ServeConn(conn io.ReadWriteCloser) {
 		log.Printf("rpc server: invalid codec type %s", opt.CodecType)
 		return
 	}
-	server.serveCodec(f(conn))
+	server.serveCodec(f(conn), opt)
 }
 
 var invalidRequest = struct{}{}
 
-func (server *Server) serveCodec(cc codec.Codec) {
+func (server *Server) serveCodec(cc codec.Codec, opt Option) {
 	sending := new(sync.Mutex)
 	wg := new(sync.WaitGroup)
 	for {
@@ -84,7 +90,7 @@ func (server *Server) serveCodec(cc codec.Codec) {
 			continue
 		}
 		wg.Add(1)
-		go server.handleRequest(cc, req, sending, wg)
+		go server.handleRequest(cc, req, sending, wg, opt.HandleTimeout)
 	}
 	wg.Wait()
 	_ = cc.Close()
@@ -141,22 +147,45 @@ func (server *Server) readRequestHeader(cc codec.Codec) (*codec.Header, error) {
 	return &header, nil
 }
 
-func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
+func (server *Server) handleRequest(cc codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup, timeout time.Duration) {
 	defer wg.Done()
+	called := make(chan bool)
+	//sent := make(chan bool)
 
-	err := req.svc.call(req.mType, req.argv, req.replyv)
-	if err != nil {
-		req.header.Error = err.Error()
-		server.sendResponse(cc, req.header, invalidRequest, sending)
-		return
+	go func() {
+		err := req.svc.call(req.mType, req.argv, req.replyv)
+		if err == nil {
+			called <- true
+		} else {
+			req.header.Error = err.Error()
+			called <- false
+		}
+	}()
+
+	valid := true
+	if timeout == 0 {
+		valid = <-called
+	} else {
+		select {
+		case <-time.After(timeout):
+			fmt.Println("handle timout")
+			req.header.Error = fmt.Sprintf("rpc server: request handle timeout")
+			valid = false
+		case valid = <-called:
+		}
 	}
-	server.sendResponse(cc, req.header, req.replyv.Interface(), sending)
+
+	if valid {
+		server.sendResponse(cc, req.header, req.replyv.Interface(), sending)
+	} else {
+		server.sendResponse(cc, req.header, invalidRequest, sending)
+	}
 }
 
 func (server *Server) Register(rcvr interface{}) error {
 	s := newService(rcvr)
 	if _, dup := server.serviceMap.LoadOrStore(s.name, s); dup {
-		return errors.New("rpc: servie already defined: " + s.name)
+		return errors.New("rpc: service already defined: " + s.name)
 	}
 	return nil
 }

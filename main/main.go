@@ -3,6 +3,7 @@ package main
 import (
 	"GeeRPC"
 	"GeeRPC/codec"
+	"context"
 	"log"
 	"net"
 	"sync"
@@ -12,6 +13,8 @@ import (
 type Foo int
 
 type Args struct{ Num1, Num2 int }
+
+type Reply int
 
 func (f Foo) Sum(args Args, reply *int) error {
 	*reply = args.Num1 + args.Num2
@@ -37,7 +40,7 @@ func main() {
 	addr := make(chan string)
 	go startServer(addr)
 
-	client, _ := GeeRPC.Dial("tcp", <-addr, codec.GobType)
+	client, _ := GeeRPC.Dial("tcp", <-addr, &GeeRPC.Option{CodecType: codec.GobType, MagicNumber: 0x31415926})
 	defer func() { _ = client.Close() }()
 
 	time.Sleep(time.Second)
@@ -47,8 +50,9 @@ func main() {
 		go func(i int) {
 			defer wg.Done()
 			args := &Args{Num1: i, Num2: i * i}
-			var reply Foo
-			if err := client.Call("Foo.Sum", args, &reply); err != nil {
+			var reply Reply
+			ctx, _ := context.WithTimeout(context.Background(), time.Second)
+			if err := client.Call(ctx, "Foo.Sum", args, &reply); err != nil {
 				log.Fatal("call Foo.Sum error:", err)
 			}
 			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
