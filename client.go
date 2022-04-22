@@ -2,6 +2,7 @@ package GeeRPC
 
 import (
 	"GeeRPC/codec"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -151,11 +153,12 @@ func generateOption(codecType codec.Type, connectionTimeout time.Duration) *Opti
 }
 
 func Dial(network string, address string, opt *Option) (client *Client, err error) {
-	return dialTimeout(network, address, opt)
+	return dialTimeout(NewClient, network, address, opt)
 }
 
-func dialTimeout(network string, address string, opt *Option) (client *Client, err error) {
+func dialTimeout(newClientFunc func(net.Conn, *Option) (*Client, error), network string, address string, opt *Option) (client *Client, err error) {
 	conn, err := net.DialTimeout(network, address, opt.ConnectTimeout)
+	fmt.Println("done net.Dialtimeout")
 	if err != nil {
 		return nil, err
 	}
@@ -169,16 +172,19 @@ func dialTimeout(network string, address string, opt *Option) (client *Client, e
 		error
 	})
 	go func() {
-		client, err := NewClient(conn, opt)
+		client, err := newClientFunc(conn, opt)
 		ch <- struct {
 			*Client
 			error
 		}{client, err}
 	}()
 	if opt.ConnectTimeout == 0 {
+		fmt.Println("wait for ch")
 		result := <-ch
+		fmt.Println("get from ch")
 		return result.Client, result.error
 	}
+	fmt.Println("enter select")
 	select {
 	case <-time.After(opt.ConnectTimeout):
 		fmt.Println("timeout in select")
@@ -237,4 +243,23 @@ func (client *Client) Call(ctx context.Context, serviceMethod string, args inter
 		client.removeCall(call.Seq)
 		return errors.New("rpc client: call failed: " + ctx.Err().Error())
 	}
+}
+
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+	fmt.Println("wait for read resp")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	fmt.Println("get resp")
+	if err == nil {
+		if resp.Status == connectedInfo {
+			return NewClient(conn, opt)
+		} else {
+			err = errors.New("unexpected HTTP response: " + resp.Status)
+		}
+	}
+	return nil, err
+}
+
+func DialHTTP(network string, address string, opt *Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, address, opt)
 }

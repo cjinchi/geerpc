@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
@@ -213,4 +214,40 @@ func (server *Server) findService(serviceMethod string) (svc *service, mType *me
 		err = errors.New("rpc server: method not found: " + methodName)
 	}
 	return
+}
+
+const (
+	connectedInfo    = "200 Connected to Gee RPC"
+	defaultRPCPath   = "/_geerpc_"
+	defaultDebugPath = "/debug/geerpc"
+)
+
+func (server *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	fmt.Println("in serve http")
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "method should be CONNECT\n")
+		return
+	}
+	fmt.Println("begin to hijack")
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+		return
+	}
+
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connectedInfo+"\n\n")
+	fmt.Println("server response")
+	server.ServeConn(conn)
+}
+
+func (server *Server) HandleHTTP() {
+	http.Handle(defaultRPCPath, server)
+	http.Handle(defaultDebugPath, debugHTTP{server})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }
